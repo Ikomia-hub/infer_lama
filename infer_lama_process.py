@@ -273,7 +273,7 @@ class InferLamaFactory(dataprocess.CTaskFactory):
         # Set process information as string here
         self.info.name = "infer_lama"
         self.info.shortDescription = "Inpainting using Fourier convolutions by Samsung Research."
-        self.info.description = "This plugging propose inference for large (irregular) "\
+        self.info.description = "This plugin propose inference for large (irregular) "\
                                 "mask inpainting (Lama). The model implementation "\
                                 "is based on fast Fourier Convolution network."\
                                 "There are two inference methods available: default and refine."\
