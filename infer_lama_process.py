@@ -15,27 +15,25 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-from ikomia import core, dataprocess
-import copy
-from distutils.util import strtobool
 
+import copy
 import os
 import numpy as np
 import cv2
 import torch
+import requests
+from ikomia import core, dataprocess
+from distutils.util import strtobool
 from omegaconf import OmegaConf
 from skimage import img_as_float
-import requests
 from urllib.parse import urlencode
 from zipfile import ZipFile
-import wget
 
 from kornia.geometry.transform import resize
-from infer_lama.saicinpainting.evaluation.utils import move_to_device 
-from infer_lama.saicinpainting.training.trainers import load_checkpoint 
-from infer_lama.saicinpainting.evaluation.data import pad_img_to_modulo, pad_tensor_to_modulo
+from infer_lama.saicinpainting.evaluation.utils import move_to_device
+from infer_lama.saicinpainting.training.trainers import load_checkpoint
+from infer_lama.saicinpainting.evaluation.data import pad_tensor_to_modulo
 from infer_lama.saicinpainting.evaluation.refinement import refine_predict
-
 
 
 # --------------------
@@ -48,22 +46,22 @@ class InferLamaParam(core.CWorkflowTaskParam):
         core.CWorkflowTaskParam.__init__(self)
         self.cuda = torch.cuda.is_available()
         self.method = "default"
-        self.px_budget = 100
         self.iter = 15
         self.ini_res = 100
         # Place default value initialization here
-        self.predict_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lama-config/predict_config.yaml")
-        self.checkpoint_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "big-lama/models/best.ckpt")
-        self.train_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lama-config/train_config.yaml")
+        self.predict_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                                                "lama-config", "predict_config.yaml")
+        self.checkpoint_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                                                "big-lama", "models", "best.ckpt")
+        self.train_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                                                "lama-config", "train_config.yaml")
         self.update = False
-     
 
     def setParamMap(self, param_map):
         # Set parameters values from Ikomia application
         # Parameters values are stored as string and accessible like a python dict
         self.cuda = strtobool(param_map["cuda"])
-        self.method = str(param_map["method"])
-        self.px_budget = int(param_map["px_budget"])
+        self.method = param_map["method"]
         self.iter = int(param_map["iter"])
         self.ini_res = int(param_map["ini_res"])
         self.predict_config_path = param_map["predict_config_path"]
@@ -77,9 +75,8 @@ class InferLamaParam(core.CWorkflowTaskParam):
         param_map = core.ParamMap()
         param_map["cuda"] = str(self.cuda)
         param_map["method"] = self.method
-        param_map["px_budget"] = str(self.px_budget)
         param_map["iter"] = str(self.iter)
-        param_map["ini_res"] = str(self.ini_res)     
+        param_map["ini_res"] = str(self.ini_res)
         param_map["predict_config_path"] = self.predict_config_path
         param_map["checkpoint_path"] = self.checkpoint_path
         param_map["train_config_file"] = self.train_config_path
@@ -94,11 +91,11 @@ class InferLama(dataprocess.C2dImageTask):
 
     def __init__(self, name, param):
         dataprocess.C2dImageTask.__init__(self, name)
-        
+
         # Detect if we have a GPU available
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         # Add input/output of the process here
-        self.model = None 
+        self.model = None
         # Config
         self.predict_config_path = None
         self.checkpoint_path = None
@@ -110,112 +107,110 @@ class InferLama(dataprocess.C2dImageTask):
         else:
             self.setParam(copy.deepcopy(param))
 
-
-
     def getProgressSteps(self):
         # Function returning the number of progress steps for this process
         # This is handled by the main progress bar of Ikomia application
         return 1
 
+    def infer(self, src_image):
 
-    def infer(self, srcImage):
-  
-       # Check input image format and generate binary mask 
-        src_ini = srcImage
+       # Check input image format and generate binary mask
+        src_ini = src_image
 
-        if srcImage.dtype == 'uint8':
-            imagef = img_as_float(srcImage)
-            graphInput = self.getInput(1)
-
-
-            if graphInput.isDataAvailable():
-                self.createGraphicsMask(imagef.shape[1], imagef.shape[0], graphInput)
-                binImg = self.getGraphicsMask(0)
+        if src_image.dtype == 'uint8':
+            imagef = img_as_float(src_image)
+            graph_input = self.getInput(1)
+            if graph_input.isDataAvailable():
+                self.createGraphicsMask(imagef.shape[1], imagef.shape[0], graph_input)
+                binimg = self.getGraphicsMask(0)
             else:
                 raise Exception("No graphic input set.")
         else:
             raise Exception("Input image should be of type unint8 (range: 0 through 255 decimal).")
 
-        
         # Convert mask to tensor
-        if binImg.ndim == 3:
-            binImg = np.transpose(binImg, (2, 0, 1))
-        binImg = binImg.astype('float32') / 255
-        binImg_3d = np.expand_dims(binImg, axis=0)
-        binImg_3d = torch.as_tensor([binImg_3d]) 
-           
- 
+        if binimg.ndim == 3:
+            binimg = np.transpose(binimg, (2, 0, 1))
+        binimg = binimg.astype('float32') / 255
+        binimg_3d = np.expand_dims(binimg, axis=0)
+        binimg_3d = torch.as_tensor([binimg_3d])
+
         # Convert input image to tensor
-        if srcImage.ndim == 3:
-            srcImage = np.transpose(srcImage, (2, 0, 1))
-        srcImage = srcImage.astype('float32') / 255
-        srcImage = torch.as_tensor([srcImage])
-       
+        if src_image.ndim == 3:
+            src_image = np.transpose(src_image, (2, 0, 1))
+        src_image = src_image.astype('float32') / 255
+        src_image = torch.as_tensor([src_image])
+
         param = self.getParam()
 
         # Resizing if image too large
-        h_orig, w_orig = src_ini.shape[0], src_ini.shape[1]
-        img_limit_size = (h_orig * w_orig) * param.ini_res * 0.01
-        if h_orig* w_orig > img_limit_size:
+
+        if param.ini_res < 100:
+            h_orig, w_orig = src_ini.shape[0], src_ini.shape[1]
+            img_limit_size = (h_orig * w_orig) * param.ini_res * 0.01
             resizing = True
-            ratio = np.sqrt(img_limit_size / float(h_orig*w_orig))
-            h,w = h_orig, w_orig
-            h,w = int(h*ratio), int(w*ratio)
-            print(f"Resizing image from unpainting from {(h_orig,w_orig)} to {(h,w)}...")
-            binImg_3d = resize(binImg_3d, (h, w),interpolation='bilinear', align_corners=False)
-            srcImage = resize(srcImage, (h, w),interpolation='bilinear', align_corners=False)
+            ratio = np.sqrt(img_limit_size / float(h_orig * w_orig))
+            h_red, w_red = int(h_orig * ratio), int(w_orig * ratio)
+            print(f"Resizing image from unpainting from {(h_orig, w_orig)} to {(h_red, w_red)}...")
+            binimg_3d = resize(
+                        binimg_3d, (h_red, w_red),
+                        interpolation = 'bilinear', align_corners = False)
+            src_image = resize(
+                        src_image, (h_red, w_red),
+                        interpolation = 'bilinear', align_corners = False)
         else:
             resizing = False
-            
+
         # Pad to tensor
-        binImg_3d = pad_tensor_to_modulo(binImg_3d, 8)
-        srcImage_pad = pad_tensor_to_modulo(srcImage, 8)
-    
-        # Reference image size 
-        unpad_to_size = [torch.as_tensor([srcImage.shape[2]]),torch.as_tensor([srcImage.shape[3]])]
-        
+        binimg_3d = pad_tensor_to_modulo(binimg_3d, 8)
+        src_image_pad = pad_tensor_to_modulo(src_image, 8)
+
+        # Reference image size
+        unpad_to_size = [torch.as_tensor([src_image.shape[2]]),
+                        torch.as_tensor([src_image.shape[3]])]
+
         # Prepare the input into batch of one for inference
-        batch = dict(image=srcImage_pad, mask=binImg_3d, unpad_to_size=unpad_to_size)
-     
-        
+        batch = dict(image = src_image_pad, mask = binimg_3d, unpad_to_size = unpad_to_size)
+
         predict_config = OmegaConf.load(param.predict_config_path)
-        
+
         # Config for refine inpainting
         if param.method == "refine":
             predict_config.refine = True
             predict_config.refiner.gpu_ids = "0,"
             predict_config.refiner.n_iters = int(param.iter)
-            predict_config.refiner.px_budget = param.px_budget * (srcImage.shape[2] * srcImage.shape[3])
-            
-        # Inpainting    
+            predict_config.refiner.px_budget = src_image.shape[2] * src_image.shape[3]
+
+        # Inpainting
         if predict_config.get('refine', False):
             assert 'unpad_to_size' in batch, "Unpadded size is required for the refinement"
             batch = move_to_device(batch, self.device)
             batch = self.model(batch)
-            cur_res = refine_predict(batch, self.model, **predict_config.refiner, devices = self.device)
+            cur_res = refine_predict(
+                    batch, self.model, **predict_config.refiner,
+                    devices = self.device)
             cur_res = cur_res[0].permute(1,2,0).detach().cpu().numpy()
             cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
-            cur_res= cv2.resize(cur_res,(src_ini.shape[1], src_ini.shape[0]), interpolation = cv2.INTER_LINEAR)
+            cur_res = cv2.resize(
+                    cur_res,(src_ini.shape[1], src_ini.shape[0]),
+                    interpolation = cv2.INTER_LINEAR)
         else:
             with torch.no_grad():
                 batch = move_to_device(batch, self.device)
-                batch = self.model(batch)                    
+                batch = self.model(batch)                
                 cur_res = batch[predict_config.out_key][0].permute(1, 2, 0).detach().cpu().numpy()
                 orig_height, orig_width = unpad_to_size
                 cur_res = cur_res[:orig_height, :orig_width]
                 cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
                 if resizing is True:
-                    cur_res = cv2.resize(cur_res,(src_ini.shape[1], src_ini.shape[0]), interpolation = cv2.INTER_LINEAR)
-                
-        
-        
+                    cur_res = cv2.resize(
+                            cur_res, (src_ini.shape[1], src_ini.shape[0]),
+                            interpolation = cv2.INTER_LINEAR)
+
         # To fix
         # Inpainted_img = self.applyGraphicsMask(src_ini, cur_res, 0)
- 
         output = self.getOutput(0)
-
-        output.setImage(cur_res)  
-        
+        output.setImage(cur_res)
 
     def run(self):
         # Core function of your process
@@ -224,45 +219,41 @@ class InferLama(dataprocess.C2dImageTask):
 
         # Get input :
         image_in = self.getInput(0)
+
         # Get image from input/output (numpy array):
-        srcImage = image_in.getImage()
+        src_image = image_in.getImage()
 
-
-        param = self.getParam()  
-
-   
+        param = self.getParam()
 
         #Downloading the model
         if not os.path.isfile(param.checkpoint_path):
             print("Downloading the model, this will take a few minutes.")
             base_url = 'https://cloud-api.yandex.net/v1/disk/public/resources/download?'
-            public_key = 'https://disk.yandex.ru/d/ouP6l8VJ0HpMZg'  
-
+            public_key = 'https://disk.yandex.ru/d/ouP6l8VJ0HpMZg'
             final_url = base_url + urlencode(dict(public_key=public_key))
             response = requests.get(final_url)
             download_url = response.json()['href']
             download_response = requests.get(download_url)
-            toFile = os.path.join(os.path.dirname(os.path.realpath(__file__)))
-
-            with open(os.path.join(toFile, "big-lama_model.zip") , 'wb') as f:  
+            to_folder = os.path.join(os.path.dirname(os.path.realpath(__file__)))
+            with open(os.path.join(to_folder, "big-lama_model.zip") , 'wb') as f:
                 f.write(download_response.content)
-            with ZipFile(os.path.join(toFile, "big-lama_model.zip"), 'r') as f:
-                f.extractall(path=toFile)
-            os.remove(os.path.join(toFile, "big-lama_model.zip"))
-        
+            with ZipFile(os.path.join(to_folder, "big-lama_model.zip"), 'r') as f:
+                f.extractall(path=to_folder)
+            os.remove(os.path.join(to_folder, "big-lama_model.zip"))
 
         # Load model
         if param.update or self.model is None:
-            self.device = torch.device("cuda") if param.cuda else torch.device("cpu")         
+            self.device = torch.device("cuda") if param.cuda else torch.device("cpu")
             train_config = OmegaConf.load(param.train_config_path)
-            self.model = load_checkpoint(train_config, param.checkpoint_path, strict=False, map_location=self.device)
+            self.model = load_checkpoint(
+                        train_config, param.checkpoint_path,
+                        strict = False, map_location=self.device)
             self.model.freeze()
             self.model.to(self.device)
             param.update = False
             print("Will run on {}".format(self.device.type))
-  
-        
-        self.infer(srcImage)
+
+        self.infer(src_image)
 
         # Step progress bar:
         self.emitStepProgress()
@@ -281,20 +272,23 @@ class InferLamaFactory(dataprocess.CTaskFactory):
         dataprocess.CTaskFactory.__init__(self)
         # Set process information as string here
         self.info.name = "infer_lama"
-        self.info.shortDescription = "Inpainting using Fourier convolutions by Samsung Research."                            
-        self.info.description = "This plugging propose inference for large (irregular) mask inpainting (Lama). "\
-                                "The model implementation is based on fast Fourier Convolution network "\
+        self.info.shortDescription = "Inpainting using Fourier convolutions by Samsung Research."
+        self.info.description = "This plugging propose inference for large (irregular) "\
+                                "mask inpainting (Lama). The model implementation "\
+                                "is based on fast Fourier Convolution network."\
                                 "There are two inference methods available: default and refine."\
                                 "The refine method requires a large amount of memory therefore"\
-                                "the image resolution can be manually adjusted according to your available memory."\
-    
+                                "the image resolution can be manually adjusted " \
+                                "according to your available memory."
+
         # relative path -> as displayed in Ikomia application process tree
         self.info.path = "Plugins/Python/Inpainting"
         self.info.version = "1.0.0"
         self.info.iconPath = "icons/icon.png"
-        self.info.authors = "Suvorov, Roman and Logacheva, Elizaveta and Mashikhin, Anton and Remizova," \
-                            " Anastasia and Ashukha, Arsenii and Silvestrov, Aleksei and Kong, Naejin and Goka," \
-                            "Harshith and Park, Kiwoong and Lempitsky, Victor"
+        self.info.authors = "Suvorov, Roman and Logacheva, Elizaveta and Mashikhin,"\
+                            "Anton and Remizova, Anastasia and Ashukha,"\
+                            "Arsenii and Silvestrov, Aleksei and Kong, Naejin and Goka,"\
+                            "Harshith and Park, Kiwoong and Lempitsky, Victor."
         self.info.article = "Resolution-robust Large Mask Inpainting with Fourier Convolutions"
         self.info.journal = "arXiv preprint arXiv:2109.07161"
         self.info.year = 2021
