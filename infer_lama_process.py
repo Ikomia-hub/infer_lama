@@ -23,7 +23,7 @@ import cv2
 import torch
 import requests
 from ikomia import core, dataprocess
-from distutils.util import strtobool
+from ikomia.utils import strtobool
 from omegaconf import OmegaConf
 from skimage import img_as_float
 from urllib.parse import urlencode
